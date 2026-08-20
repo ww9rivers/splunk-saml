@@ -1,0 +1,31 @@
+{
+  "instances": {
+    "splunk01": {
+      "hostname": "splunk01.example.com",
+      "metadataUrl": "https://login.microsoftonline.com/<tenant-id>/federationmetadata/2007-06/federationmetadata.xml?appid=<application-id>",
+      "entityId": "https://splunk01.example.com:8000",
+      "ssoUrl": "https://login.microsoftonline.com/<tenant-id>/saml2",
+      "usernameAttribute": "http://schemas.xmlsoap.org/ws/2005/05/identity/claims/emailaddress",
+      "groupAttribute": "http://schemas.microsoft.com/ws/2008/06/identity/claims/groups",
+      "roleMapping": {
+        "SplunkAdmins": "admin",
+        "SplunkUsers": "user"
+      }
+    },
+    "splunk02": {
+      "hostname": "splunk02.example.com",
+      "managementUrl": "https://splunk02.internal.example.com:8089",
+      "webUrl": "https://splunk.example.com",
+      "loadBalancerHostname": "splunk.example.com",
+      "metadataUrl": "https://login.microsoftonline.com/<tenant-id>/federationmetadata/2007-06/federationmetadata.xml?appid=<application-id>",
+      "entityId": "https://splunk.example.com",
+      "ssoUrl": "https://login.microsoftonline.com/<tenant-id>/saml2",
+      "usernameAttribute": "http://schemas.xmlsoap.org/ws/2005/05/identity/claims/emailaddress",
+      "groupAttribute": "http://schemas.microsoft.com/ws/2008/06/identity/claims/groups",
+      "roleMapping": {
+        "SplunkAdmins": "admin",
+        "SplunkUsers": "user"
+      }
+    }
+  }
+}
