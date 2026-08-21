@@ -19,6 +19,8 @@ afterEach(async () => {
 async function runConfigure(
   stanzaExists: boolean,
   options: {
+    sharedGroupAttribute?: string;
+    instanceGroupAttribute?: string;
     sharedRoleMapping?: Record<string, string | string[]>;
     instanceRoleMapping?: Record<string, string | string[]>;
     existingRoleMapping?: Record<string, string[]>;
@@ -66,6 +68,7 @@ async function runConfigure(
     const configPath = join(directory, "saml.json");
     const credentialsPath = join(directory, "credentials.json");
     await writeFile(configPath, JSON.stringify({
+      ...(options.sharedGroupAttribute === undefined ? {} : { groupAttribute: options.sharedGroupAttribute }),
       ...(options.sharedRoleMapping === undefined ? {} : { roleMapping: options.sharedRoleMapping }),
       instances: {
         dev4: {
@@ -75,7 +78,7 @@ async function runConfigure(
           metadataUrl: `${baseUrl}/<tenantId>/idp-metadata`,
           entityId: "https://dev4.example.com:8000",
           ssoUrl: "https://login.microsoftonline.com/<tenantId>/saml2",
-          groupAttribute: "groups",
+          ...(options.instanceGroupAttribute === undefined ? {} : { groupAttribute: options.instanceGroupAttribute }),
           ...(options.instanceRoleMapping === undefined ? {} : { roleMapping: options.instanceRoleMapping }),
         },
       },
@@ -120,6 +123,7 @@ async function runConfigure(
 describe("saml configure", () => {
   test("creates a missing stanza with the required name and Splunk field names", async () => {
     const { requests, stdout } = await runConfigure(false, {
+      sharedGroupAttribute: "entraRole",
       sharedRoleMapping: { SplunkUsers: ["user"], MedicalSplunkAdmins: ["user"] },
       instanceRoleMapping: { MedicalSplunkAdmins: ["admin", "power"] },
     });
@@ -133,7 +137,7 @@ describe("saml configure", () => {
     expect(form.get("fqdn")).toBe("https://dev4.example.com");
     expect(form.get("redirectPort")).toBe("8000");
     expect(form.get("redirectAfterLogoutToUrl")).toBe("https://dev4.example.com:8000");
-    expect(form.get("attributeAliasRole")).toBe("groups");
+    expect(form.get("attributeAliasRole")).toBe("entraRole");
     expect(form.get("idpMetadataPayload")).toContain("<md:EntityDescriptor");
     expect(form.has("ssoUrl")).toBe(false);
     expect(form.has("metadataUrl")).toBe(false);
@@ -157,7 +161,9 @@ describe("saml configure", () => {
     const { requests, stdout } = await runConfigure(true);
     const post = requests.find((request) => request.method === "POST");
     expect(post?.path).toBe("/services/authentication/providers/SAML/saml");
-    expect(new URLSearchParams(post?.body).has("name")).toBe(false);
+    const form = new URLSearchParams(post?.body);
+    expect(form.has("name")).toBe(false);
+    expect(form.get("attributeAliasRole")).toBe("role");
     const roleMappingPost = requests.find((request) => request.path === "/services/admin/SAML-groups");
     expect(new URLSearchParams(roleMappingPost?.body).get("name")).toBe("SplunkAdmins");
     expect(new URLSearchParams(roleMappingPost?.body).getAll("roles")).toEqual(["admin"]);

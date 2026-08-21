@@ -132,10 +132,13 @@ During `saml configure`, the CLI sends the downloaded XML as Splunk's `idpMetada
 
 ## SAML group role mapping
 
-Use a root-level `roleMapping` to define mappings shared by every instance. Each group value received from Entra maps to one or more Splunk roles:
+Set the root-level `groupAttribute` to the exact `Name` of the SAML attribute containing group values. It defaults to `role`, matching an assertion such as `<Attribute Name="role">`. An instance may still provide a private `groupAttribute` override when necessary.
+
+Use a root-level `roleMapping` to define mappings shared by every instance. Each value within `groupAttribute` maps to one or more Splunk roles:
 
 ```json
 {
+  "groupAttribute": "role",
   "roleMapping": {
     "SplunkAdmins": ["admin"],
     "SplunkUsers": ["user"]

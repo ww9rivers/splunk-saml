@@ -22,7 +22,7 @@ type SAMLConfig = {
   entityId: string;
   ssoUrl: string;
   usernameAttribute?: string;
-  groupAttribute?: string;
+  groupAttribute: string;
   roleMapping: Record<string, string[]>;
 };
 
@@ -34,11 +34,13 @@ type InstanceConfig = SAMLConfig & {
 };
 
 type ConfigFile = {
+  groupAttribute: string;
   roleMapping: Record<string, string[]>;
   instances: Record<string, InstanceConfig>;
 };
 
 const DEFAULT_ROLE_MAPPING: Record<string, string[]> = { SplunkAdmins: ["admin"] };
+const DEFAULT_GROUP_ATTRIBUTE = "role";
 
 const args = process.argv.slice(2);
 const debugLevel = Math.min(2, args.reduce((level, argument) => {
@@ -422,7 +424,12 @@ async function fetchIdpMetadata(instanceName: string, metadataUrl: string): Prom
   return { xml, certificates };
 }
 
-function resolveInstance(name: string, value: unknown, sharedRoleMapping: Record<string, string[]>): InstanceConfig {
+function resolveInstance(
+  name: string,
+  value: unknown,
+  sharedGroupAttribute: string,
+  sharedRoleMapping: Record<string, string[]>,
+): InstanceConfig {
   if (!/^[A-Za-z0-9][A-Za-z0-9-]*$/.test(name)) {
     throw new Error(`Invalid instance key "${name}": use a short-form hostname without dots`);
   }
@@ -487,6 +494,10 @@ function resolveInstance(name: string, value: unknown, sharedRoleMapping: Record
   if (typeof instance.samlStanzaName === "string" && !instance.samlStanzaName.trim()) {
     throw new Error(`Instance "${name}" has an invalid samlStanzaName`);
   }
+  const groupAttribute = typeof instance.groupAttribute === "string"
+    ? instance.groupAttribute.trim()
+    : sharedGroupAttribute;
+  if (!groupAttribute) throw new Error(`Instance "${name}" has an invalid groupAttribute`);
   const privateRoleMapping = resolveRoleMapping(`Instance "${name}"`, instance.roleMapping, {});
   const roleMapping = { ...sharedRoleMapping, ...privateRoleMapping };
 
@@ -501,7 +512,7 @@ function resolveInstance(name: string, value: unknown, sharedRoleMapping: Record
     ...(metadataUrl ? { metadataUrl } : {}),
     ...(hasCertificatePath ? { idpCertificatePath: String(instance.idpCertificatePath) } : {}),
     ...(typeof instance.usernameAttribute === "string" ? { usernameAttribute: instance.usernameAttribute } : {}),
-    ...(typeof instance.groupAttribute === "string" ? { groupAttribute: instance.groupAttribute } : {}),
+    groupAttribute,
     roleMapping,
     ...(loadBalancerHostname ? { loadBalancerHostname } : {}),
   };
@@ -514,7 +525,14 @@ async function loadConfigFile(): Promise<ConfigFile> {
     throw new Error(`Invalid SAML config file: ${path}`);
   }
 
-  const root = parsed as { roleMapping?: unknown; instances?: unknown };
+  const root = parsed as { groupAttribute?: unknown; roleMapping?: unknown; instances?: unknown };
+  if (root.groupAttribute !== undefined && typeof root.groupAttribute !== "string") {
+    throw new Error("Root configuration has an invalid groupAttribute");
+  }
+  const groupAttribute = typeof root.groupAttribute === "string"
+    ? root.groupAttribute.trim()
+    : DEFAULT_GROUP_ATTRIBUTE;
+  if (!groupAttribute) throw new Error("Root configuration has an invalid groupAttribute");
   const roleMapping = resolveRoleMapping("Root configuration", root.roleMapping, DEFAULT_ROLE_MAPPING);
   const instances = root.instances;
   if (!instances || typeof instances !== "object" || Array.isArray(instances)) {
@@ -524,9 +542,9 @@ async function loadConfigFile(): Promise<ConfigFile> {
   const entries = Object.entries(instances);
   if (!entries.length) throw new Error("SAML config must contain at least one instance");
   const resolvedInstances = Object.fromEntries(
-    entries.map(([name, instance]) => [name, resolveInstance(name, instance, roleMapping)]),
+    entries.map(([name, instance]) => [name, resolveInstance(name, instance, groupAttribute, roleMapping)]),
   );
-  return { roleMapping, instances: resolvedInstances };
+  return { groupAttribute, roleMapping, instances: resolvedInstances };
 }
 
 async function loadInstance(): Promise<{ name: string; config: InstanceConfig }> {
@@ -572,7 +590,7 @@ function samlSettings(instance: InstanceConfig, idpMetadata?: string): Record<st
     entityId: instance.entityId,
     idpSSOUrl: instance.ssoUrl,
     ...(instance.usernameAttribute ? { attributeAliasMail: instance.usernameAttribute } : {}),
-    ...(instance.groupAttribute ? { attributeAliasRole: instance.groupAttribute } : {}),
+    attributeAliasRole: instance.groupAttribute,
     fqdn,
     redirectPort,
     redirectAfterLogoutToUrl: `${fqdn}:${redirectPort}`,
