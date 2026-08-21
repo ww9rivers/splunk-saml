@@ -1,30 +1,31 @@
 {
+  "roleMapping": {
+    "SplunkAdmins": ["admin"],
+    "SplunkUsers": ["user"]
+  },
   "instances": {
     "splunk01": {
       "hostname": "splunk01.example.com",
-      "metadataUrl": "https://login.microsoftonline.com/<tenant-id>/federationmetadata/2007-06/federationmetadata.xml?appid=<application-id>",
+      "tenantId": "11111111-2222-4333-8444-555555555555",
+      "metadataUrl": "https://login.microsoftonline.com/<tenantId>/federationmetadata/2007-06/federationmetadata.xml?appid=aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
       "entityId": "https://splunk01.example.com:8000",
-      "ssoUrl": "https://login.microsoftonline.com/<tenant-id>/saml2",
+      "ssoUrl": "https://login.microsoftonline.com/<tenantId>/saml2",
       "usernameAttribute": "http://schemas.xmlsoap.org/ws/2005/05/identity/claims/emailaddress",
-      "groupAttribute": "http://schemas.microsoft.com/ws/2008/06/identity/claims/groups",
-      "roleMapping": {
-        "SplunkAdmins": "admin",
-        "SplunkUsers": "user"
-      }
+      "groupAttribute": "http://schemas.microsoft.com/ws/2008/06/identity/claims/groups"
     },
     "splunk02": {
       "hostname": "splunk02.example.com",
       "managementUrl": "https://splunk02.internal.example.com:8089",
       "webUrl": "https://splunk.example.com",
       "loadBalancerHostname": "splunk.example.com",
-      "metadataUrl": "https://login.microsoftonline.com/<tenant-id>/federationmetadata/2007-06/federationmetadata.xml?appid=<application-id>",
+      "tenantId": "66666666-7777-4888-8999-aaaaaaaaaaaa",
+      "metadataUrl": "https://login.microsoftonline.com/<tenantId>/federationmetadata/2007-06/federationmetadata.xml?appid=bbbbbbbb-cccc-4ddd-8eee-ffffffffffff",
       "entityId": "https://splunk.example.com",
-      "ssoUrl": "https://login.microsoftonline.com/<tenant-id>/saml2",
+      "ssoUrl": "https://login.microsoftonline.com/<tenantId>/saml2",
       "usernameAttribute": "http://schemas.xmlsoap.org/ws/2005/05/identity/claims/emailaddress",
       "groupAttribute": "http://schemas.microsoft.com/ws/2008/06/identity/claims/groups",
       "roleMapping": {
-        "SplunkAdmins": "admin",
-        "SplunkUsers": "user"
+        "SplunkPowerUsers": ["power", "user"]
       }
     }
   }

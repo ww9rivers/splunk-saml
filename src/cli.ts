@@ -15,13 +15,15 @@ type Credentials = {
 };
 
 type SAMLConfig = {
+  samlStanzaName?: string;
+  tenantId: string;
   metadataUrl?: string;
   idpCertificatePath?: string;
   entityId: string;
   ssoUrl: string;
   usernameAttribute?: string;
   groupAttribute?: string;
-  roleMapping?: Record<string, string>;
+  roleMapping: Record<string, string[]>;
 };
 
 type InstanceConfig = SAMLConfig & {
@@ -32,8 +34,11 @@ type InstanceConfig = SAMLConfig & {
 };
 
 type ConfigFile = {
+  roleMapping: Record<string, string[]>;
   instances: Record<string, InstanceConfig>;
 };
+
+const DEFAULT_ROLE_MAPPING: Record<string, string[]> = { SplunkAdmins: ["admin"] };
 
 const args = process.argv.slice(2);
 const debugLevel = Math.min(2, args.reduce((level, argument) => {
@@ -334,6 +339,38 @@ function validateUrl(instanceName: string, field: string, value: unknown): strin
   }
 }
 
+function substituteTenantId(instanceName: string, field: string, value: string, tenantId: string): string {
+  const substituted = value.replaceAll("<tenantId>", tenantId);
+  const unresolved = substituted.match(/<[^<>]+>/)?.[0];
+  if (unresolved) {
+    throw new Error(
+      `Instance "${instanceName}" has an unresolved placeholder ${unresolved} in ${field}; only <tenantId> is substituted automatically`,
+    );
+  }
+  return substituted;
+}
+
+function resolveRoleMapping(context: string, value: unknown, fallback: Record<string, string[]>): Record<string, string[]> {
+  if (value === undefined) return fallback;
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error(`${context} has an invalid roleMapping`);
+  }
+
+  const normalized: Record<string, string[]> = {};
+  for (const [group, configuredRoles] of Object.entries(value)) {
+    if (!group.trim()) throw new Error(`${context} has an empty SAML group in roleMapping`);
+    const roles = typeof configuredRoles === "string" ? [configuredRoles] : configuredRoles;
+    if (
+      !Array.isArray(roles) || !roles.length ||
+      roles.some((role) => typeof role !== "string" || !role.trim())
+    ) {
+      throw new Error(`${context} has invalid Splunk roles for SAML group "${group}"`);
+    }
+    normalized[group] = [...new Set(roles.map((role) => role.trim()))];
+  }
+  return normalized;
+}
+
 function extractSigningCertificates(metadata: string): string[] {
   const certificates = new Set<string>();
   const keyDescriptors = metadata.matchAll(
@@ -385,7 +422,7 @@ async function fetchIdpMetadata(instanceName: string, metadataUrl: string): Prom
   return { xml, certificates };
 }
 
-function resolveInstance(name: string, value: unknown): InstanceConfig {
+function resolveInstance(name: string, value: unknown, sharedRoleMapping: Record<string, string[]>): InstanceConfig {
   if (!/^[A-Za-z0-9][A-Za-z0-9-]*$/.test(name)) {
     throw new Error(`Invalid instance key "${name}": use a short-form hostname without dots`);
   }
@@ -394,9 +431,14 @@ function resolveInstance(name: string, value: unknown): InstanceConfig {
   }
 
   const instance = value as Record<string, unknown>;
-  const required = ["hostname", "entityId", "ssoUrl"];
+  const required = ["hostname", "tenantId", "entityId", "ssoUrl"];
   const missing = required.filter((key) => typeof instance[key] !== "string" || !instance[key]);
   if (missing.length) throw new Error(`Instance "${name}" is missing: ${missing.join(", ")}`);
+
+  const tenantId = String(instance.tenantId).trim();
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(tenantId)) {
+    throw new Error(`Instance "${name}" has an invalid tenantId; use the Microsoft Entra Directory (tenant) ID`);
+  }
 
   if ("certificate" in instance) {
     throw new Error(`Instance "${name}" uses the retired certificate field; remove it and use metadataUrl or idpCertificatePath`);
@@ -418,9 +460,17 @@ function resolveInstance(name: string, value: unknown): InstanceConfig {
   );
   const webUrl = validateUrl(name, "webUrl", instance.webUrl ?? `https://${hostname}:8000`);
   const metadataUrl = hasMetadataUrl
-    ? validateUrl(name, "metadataUrl", instance.metadataUrl)
+    ? validateUrl(
+      name,
+      "metadataUrl",
+      substituteTenantId(name, "metadataUrl", String(instance.metadataUrl), tenantId),
+    )
     : undefined;
-  validateUrl(name, "ssoUrl", instance.ssoUrl);
+  const ssoUrl = validateUrl(
+    name,
+    "ssoUrl",
+    substituteTenantId(name, "ssoUrl", String(instance.ssoUrl), tenantId),
+  );
 
   if (instance.managementUrl !== undefined && typeof instance.managementUrl !== "string") {
     throw new Error(`Instance "${name}" has an invalid managementUrl`);
@@ -429,34 +479,30 @@ function resolveInstance(name: string, value: unknown): InstanceConfig {
     throw new Error(`Instance "${name}" has an invalid webUrl`);
   }
 
-  for (const field of ["usernameAttribute", "groupAttribute"]) {
+  for (const field of ["samlStanzaName", "usernameAttribute", "groupAttribute"]) {
     if (instance[field] !== undefined && typeof instance[field] !== "string") {
       throw new Error(`Instance "${name}" has an invalid ${field}`);
     }
   }
-  if (
-    instance.roleMapping !== undefined &&
-    (
-      !instance.roleMapping ||
-      typeof instance.roleMapping !== "object" ||
-      Array.isArray(instance.roleMapping) ||
-      Object.values(instance.roleMapping).some((role) => typeof role !== "string")
-    )
-  ) {
-    throw new Error(`Instance "${name}" has an invalid roleMapping`);
+  if (typeof instance.samlStanzaName === "string" && !instance.samlStanzaName.trim()) {
+    throw new Error(`Instance "${name}" has an invalid samlStanzaName`);
   }
+  const privateRoleMapping = resolveRoleMapping(`Instance "${name}"`, instance.roleMapping, {});
+  const roleMapping = { ...sharedRoleMapping, ...privateRoleMapping };
 
   return {
     hostname,
     managementUrl,
     webUrl,
+    tenantId,
     entityId: String(instance.entityId),
-    ssoUrl: String(instance.ssoUrl),
+    ssoUrl,
+    ...(typeof instance.samlStanzaName === "string" ? { samlStanzaName: instance.samlStanzaName.trim() } : {}),
     ...(metadataUrl ? { metadataUrl } : {}),
     ...(hasCertificatePath ? { idpCertificatePath: String(instance.idpCertificatePath) } : {}),
     ...(typeof instance.usernameAttribute === "string" ? { usernameAttribute: instance.usernameAttribute } : {}),
     ...(typeof instance.groupAttribute === "string" ? { groupAttribute: instance.groupAttribute } : {}),
-    ...(instance.roleMapping ? { roleMapping: instance.roleMapping as Record<string, string> } : {}),
+    roleMapping,
     ...(loadBalancerHostname ? { loadBalancerHostname } : {}),
   };
 }
@@ -468,7 +514,9 @@ async function loadConfigFile(): Promise<ConfigFile> {
     throw new Error(`Invalid SAML config file: ${path}`);
   }
 
-  const instances = (parsed as { instances?: unknown }).instances;
+  const root = parsed as { roleMapping?: unknown; instances?: unknown };
+  const roleMapping = resolveRoleMapping("Root configuration", root.roleMapping, DEFAULT_ROLE_MAPPING);
+  const instances = root.instances;
   if (!instances || typeof instances !== "object" || Array.isArray(instances)) {
     throw new Error('SAML config must contain a root "instances" object');
   }
@@ -476,9 +524,9 @@ async function loadConfigFile(): Promise<ConfigFile> {
   const entries = Object.entries(instances);
   if (!entries.length) throw new Error("SAML config must contain at least one instance");
   const resolvedInstances = Object.fromEntries(
-    entries.map(([name, instance]) => [name, resolveInstance(name, instance)]),
+    entries.map(([name, instance]) => [name, resolveInstance(name, instance, roleMapping)]),
   );
-  return { instances: resolvedInstances };
+  return { roleMapping, instances: resolvedInstances };
 }
 
 async function loadInstance(): Promise<{ name: string; config: InstanceConfig }> {
@@ -515,20 +563,82 @@ async function validateConfig(): Promise<void> {
   }
 }
 
-function samlSettings(instance: InstanceConfig): Omit<SAMLConfig, "idpCertificatePath"> & { fqdn?: string; idpCertPath?: string } {
-  const {
-    hostname: _hostname,
-    managementUrl: _managementUrl,
-    webUrl: _webUrl,
-    loadBalancerHostname,
-    idpCertificatePath,
-    ...saml
-  } = instance;
+function samlSettings(instance: InstanceConfig, idpMetadata?: string): Record<string, string> {
+  const webUrl = new URL(instance.webUrl);
+  const publicHostname = instance.loadBalancerHostname ?? webUrl.hostname;
+  const fqdn = `${webUrl.protocol}//${publicHostname}`;
+  const redirectPort = webUrl.port || (webUrl.protocol === "https:" ? "443" : "80");
   return {
-    ...saml,
-    ...(loadBalancerHostname ? { fqdn: loadBalancerHostname } : {}),
-    ...(idpCertificatePath ? { idpCertPath: idpCertificatePath } : {}),
+    entityId: instance.entityId,
+    idpSSOUrl: instance.ssoUrl,
+    ...(instance.usernameAttribute ? { attributeAliasMail: instance.usernameAttribute } : {}),
+    ...(instance.groupAttribute ? { attributeAliasRole: instance.groupAttribute } : {}),
+    fqdn,
+    redirectPort,
+    redirectAfterLogoutToUrl: `${fqdn}:${redirectPort}`,
+    ...(instance.idpCertificatePath ? { idpCertPath: instance.idpCertificatePath } : {}),
+    ...(idpMetadata ? { idpMetadataPayload: idpMetadata } : {}),
   };
+}
+
+function formRequest(body: URLSearchParams, sessionKey: string): RequestInit {
+  return {
+    method: "POST",
+    headers: {
+      Authorization: `Splunk ${sessionKey}`,
+      "content-type": "application/x-www-form-urlencoded",
+    },
+    body,
+  };
+}
+
+async function configureRoleMappings(credentials: Credentials, roleMapping: Record<string, string[]>): Promise<void> {
+  const collectionPath = "/services/admin/SAML-groups";
+  const listResponse = await splunkFetch(apiUrl(credentials.baseUrl, `${collectionPath}?output_mode=json`), {
+    headers: { Authorization: `Splunk ${credentials.sessionKey}`, Accept: "application/json" },
+  }, credentials.insecure);
+  const listText = await listResponse.text();
+  if (!listResponse.ok) {
+    throw new Error(`Unable to read existing SAML role mappings (${listResponse.status}): ${listText}`);
+  }
+  const parsed = JSON.parse(listText) as {
+    entry?: Array<{ name?: string; content?: { roles?: string[] | string } }>;
+  };
+  const existing = new Map((parsed.entry ?? []).flatMap((entry) => {
+    if (!entry.name) return [];
+    const roles = Array.isArray(entry.content?.roles)
+      ? entry.content.roles
+      : typeof entry.content?.roles === "string" ? [entry.content.roles] : [];
+    return [[entry.name, roles] as const];
+  }));
+
+  for (const [externalGroup, roles] of Object.entries(roleMapping)) {
+    const currentRoles = existing.get(externalGroup);
+    if (currentRoles && [...currentRoles].sort().join("\0") === [...roles].sort().join("\0")) continue;
+    if (currentRoles) {
+      const deleteResponse = await splunkFetch(
+        apiUrl(credentials.baseUrl, `${collectionPath}/${encodeURIComponent(externalGroup)}`),
+        { method: "DELETE", headers: { Authorization: `Splunk ${credentials.sessionKey}` } },
+        credentials.insecure,
+      );
+      const deleteText = await deleteResponse.text();
+      if (!deleteResponse.ok) {
+        throw new Error(`Unable to replace SAML role mapping for "${externalGroup}" (${deleteResponse.status}): ${deleteText}`);
+      }
+    }
+
+    const body = new URLSearchParams({ name: externalGroup });
+    for (const role of roles) body.append("roles", role);
+    const response = await splunkFetch(
+      apiUrl(credentials.baseUrl, collectionPath),
+      formRequest(body, credentials.sessionKey),
+      credentials.insecure,
+    );
+    const text = await response.text();
+    if (!response.ok) {
+      throw new Error(`SAML role mapping for "${externalGroup}" failed (${response.status}): ${text}`);
+    }
+  }
 }
 
 async function configure(): Promise<void> {
@@ -537,19 +647,39 @@ async function configure(): Promise<void> {
   if (config.managementUrl.replace(/\/$/, "") !== credentials.baseUrl.replace(/\/$/, "")) {
     throw new Error(`Credentials are for ${credentials.baseUrl}, but instance "${name}" uses ${config.managementUrl}`);
   }
+  let idpMetadata: string | undefined;
   if (config.metadataUrl) {
     const metadata = await fetchIdpMetadata(name, config.metadataUrl);
+    idpMetadata = metadata.xml;
     console.log(`Validated ${metadata.certificates.length} IdP signing certificate${metadata.certificates.length === 1 ? "" : "s"} from metadata.`);
   }
-  const response = await splunkFetch(apiUrl(credentials.baseUrl, "/services/authentication/providers/SAML"), {
-    method: "POST",
-    headers: { Authorization: `Splunk ${credentials.sessionKey}`, "content-type": "application/json" },
-    body: JSON.stringify(samlSettings(config)),
+
+  const collectionPath = "/services/authentication/providers/SAML";
+  const stanzaName = config.samlStanzaName ?? "saml";
+  const stanzaPath = `${collectionPath}/${encodeURIComponent(stanzaName)}`;
+  const lookup = await splunkFetch(apiUrl(credentials.baseUrl, `${stanzaPath}?output_mode=json`), {
+    headers: { Authorization: `Splunk ${credentials.sessionKey}`, Accept: "application/json" },
   }, credentials.insecure);
+  if (!lookup.ok && lookup.status !== 404) {
+    throw new Error(`Unable to check SAML stanza "${stanzaName}" (${lookup.status}): ${await lookup.text()}`);
+  }
+
+  const exists = lookup.ok;
+  const body = new URLSearchParams(samlSettings(config, idpMetadata));
+  if (!exists) body.set("name", stanzaName);
+  const response = await splunkFetch(
+    apiUrl(credentials.baseUrl, exists ? stanzaPath : collectionPath),
+    formRequest(body, credentials.sessionKey),
+    credentials.insecure,
+  );
   const text = await response.text();
   if (!response.ok) throw new Error(`SAML configuration failed (${response.status}): ${text}`);
-  console.log(`SAML configuration for "${name}" submitted to Splunk.`);
-  if (text) console.log(text);
+  console.log(`SAML configuration stanza "${stanzaName}" for "${name}" ${exists ? "updated" : "created"}.`);
+
+  if (Object.keys(config.roleMapping).length) {
+    await configureRoleMappings(credentials, config.roleMapping);
+    console.log(`Configured ${Object.keys(config.roleMapping).length} SAML role mapping${Object.keys(config.roleMapping).length === 1 ? "" : "s"}.`);
+  }
 }
 
 async function downloadMetadata(): Promise<void> {
@@ -587,4 +717,6 @@ async function main(): Promise<void> {
   throw new Error(`Unknown command: ${command}`);
 }
 
-main().catch((error: unknown) => { console.error(error instanceof Error ? error.message : error); process.exit(1); });
+if (import.meta.main) {
+  main().catch((error: unknown) => { console.error(error instanceof Error ? error.message : error); process.exit(1); });
+}

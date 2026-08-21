@@ -61,6 +61,24 @@ Each entry in the root `instances` object is keyed by a short-form hostname and 
 - `managementUrl`: `https://<hostname>:8089`
 - `webUrl`: `https://<hostname>:8000`
 
+The CLI creates or updates Splunk's standard `saml` configuration stanza. Set `samlStanzaName` only when the instance uses a different stanza name:
+
+```json
+"samlStanzaName": "saml-test"
+```
+
+Each instance also requires `tenantId`, set to its Microsoft Entra **Directory (tenant) ID**. The CLI substitutes the exact, case-sensitive `<tenantId>` placeholder in `metadataUrl` and `ssoUrl` before validating or using those URLs:
+
+```json
+{
+  "tenantId": "11111111-2222-4333-8444-555555555555",
+  "metadataUrl": "https://login.microsoftonline.com/<tenantId>/federationmetadata/2007-06/federationmetadata.xml?appid=<application-id>",
+  "ssoUrl": "https://login.microsoftonline.com/<tenantId>/saml2"
+}
+```
+
+Replace `<application-id>` yourself with the Entra application/client ID. The CLI rejects unresolved URL placeholders instead of sending them to Splunk.
+
 Set either URL explicitly when Splunk uses different ports, an internal management name, or a reverse proxy. For example:
 
 ```json
@@ -76,7 +94,13 @@ Set either URL explicitly when Splunk uses different ports, an internal manageme
 }
 ```
 
-`loadBalancerHostname` is optional. When present, `saml configure` sends it as Splunk's SAML `fqdn` setting, corresponding to the **Load balancer hostname or IP address** field in Splunk Web. Leave it unset when users access a standalone instance directly.
+For SAML, the CLI explicitly derives these Splunk settings from `webUrl`:
+
+- `fqdn` (**Load balancer hostname or IP address**): the public scheme and FQDN without a port, such as `https://splunk01.example.com`
+- `redirectPort` (**Redirect port - load balancer port**): the public web port, such as `8000`
+- `redirectAfterLogoutToUrl` (**Redirect to URL after logout**): the public URL with its explicit port, such as `https://splunk01.example.com:8000`
+
+These settings make Splunk generate an FQDN-based assertion consumer service URL, such as `https://splunk01.example.com:8000/saml/acs`, which must match the Reply URL configured in Entra. `loadBalancerHostname` is optional and overrides the hostname derived from `webUrl`; its value remains a hostname or IP address without a scheme or port.
 
 ## IdP metadata and signing certificates
 
@@ -91,9 +115,10 @@ For a manually managed IdP certificate, omit `metadataUrl` and set `idpCertifica
   "instances": {
     "splunk01": {
       "hostname": "splunk01.example.com",
+      "tenantId": "11111111-2222-4333-8444-555555555555",
       "idpCertificatePath": "entra/signing",
       "entityId": "https://splunk01.example.com:8000",
-      "ssoUrl": "https://login.microsoftonline.com/<tenant-id>/saml2"
+      "ssoUrl": "https://login.microsoftonline.com/<tenantId>/saml2"
     }
   }
 }
@@ -102,6 +127,33 @@ For a manually managed IdP certificate, omit `metadataUrl` and set `idpCertifica
 This path is on the Splunk host and maps to Splunk's `idpCertPath` setting; it is not a path on the machine running this CLI. Configure exactly one of `metadataUrl` or `idpCertificatePath`.
 
 `saml validate` performs local schema validation. Add `--remote` to retrieve the IdP metadata and report how many signing certificates it contains without changing Splunk.
+
+During `saml configure`, the CLI sends the downloaded XML as Splunk's `idpMetadataPayload`, allowing Splunk to import the IdP endpoints and signing certificates. REST requests use URL-encoded form fields, as required by the [Splunk Enterprise 10.4 access endpoint reference](https://help.splunk.com/en/splunk-enterprise/leverage-rest-apis/rest-api-reference/10.4/access-endpoints/access-endpoint-descriptions). If the configured stanza exists it is updated through `/services/authentication/providers/SAML/<stanza>`; otherwise it is created through the collection endpoint with the required `name` field.
+
+## SAML group role mapping
+
+Use a root-level `roleMapping` to define mappings shared by every instance. Each group value received from Entra maps to one or more Splunk roles:
+
+```json
+{
+  "roleMapping": {
+    "SplunkAdmins": ["admin"],
+    "SplunkUsers": ["user"]
+  },
+  "instances": {
+    "dev4": {
+      "roleMapping": {
+        "SplunkAdmins": ["admin", "user"],
+        "SplunkPowerUsers": ["power", "user"]
+      }
+    }
+  }
+}
+```
+
+An instance's private `roleMapping` is merged over the root mapping. A matching group replaces the shared role list for that instance; a new group extends it. When the root `roleMapping` is omitted, it defaults to `{ "SplunkAdmins": ["admin"] }`. Set the root mapping to `{}` to disable shared mappings. A single role can also be written as a string for compatibility, for example `"SplunkAdmins": "admin"`.
+
+The CLI applies the effective per-instance mappings through Splunk's `/services/admin/SAML-groups` endpoint and replaces a listed group's existing mapping when its configured roles change. Existing Splunk groups not present in the effective mapping are left unchanged.
 
 ## HTTP debugging
 
